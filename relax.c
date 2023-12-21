@@ -166,7 +166,10 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose)
             for (int j = 0; j < as; j++)
             {
                 masterArray[i][j] = testingArray[i][j];
-                dummyArray[i][j] = -1;
+                if (i == 0 || i == as - 1)
+                    dummyArray[i][j] = testingArray[i][j];
+                else
+                    dummyArray[i][j] = -1;
             }
         }
 
@@ -195,22 +198,20 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose)
             updatedBuffer[i - 1][j] = (buffer[i + 1][j] + buffer[i - 1][j] + buffer[i][j + 1] + buffer[i][j - 1]) / 4;
         updatedBuffer[i - 1][0] = buffer[i][0];
         updatedBuffer[i - 1][as - 1] = buffer[i][as - 1];
-    }
 
-    // Output all updated values from each buffer
-    for (int i = 0; i < worldSize; i++)
-        if (worldRank == i)
+        // Send updated values to dummy array
+        if (worldRank == 0)
         {
-            for (int j = 0; j < rowsPerProc - 2; j++)
-            {
-                for (int k = 0; k < as; k++)
-                    printf("%0.3f ", updatedBuffer[j][k]);
-                printf("\n");
-            }
-            printf("^^ from %d\n", worldRank);
+            for (int j = 0; j < as; j++)
+                dummyArray[i][j] = updatedBuffer[i - 1][j];
+
+            for (int j = 1; j < worldSize; j++)
+                MPI_Recv(dummyArray[j * (rowsPerProc - 2) + i], as, MPI_DOUBLE, j, j * (rowsPerProc - 2) + i, MPI_COMM_WORLD, &stat);
         }
 
-    MPI_Barrier(MPI_COMM_WORLD);
+        else
+            MPI_Send(updatedBuffer[i - 1], as, MPI_DOUBLE, 0, worldRank * (rowsPerProc - 2) + i, MPI_COMM_WORLD);
+    }
 
     // Output result to console
     if (verbose == 1 && worldRank == 0)
