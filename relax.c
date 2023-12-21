@@ -136,9 +136,11 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose)
     MPI_Status stat;
 
     double **masterArray;
-    double **dummyArray;
     double **buffer;
     double **updatedBuffer;
+
+    double diff = 0;
+    int loop = 1;
 
     //(currently need exact divisors)
     int rowsPerProc = ((as - 2) / worldSize) + 2;
@@ -156,97 +158,112 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose)
 
     if (worldRank == 0)
     {
+        // Root process initialises master array
         masterArray = (double **)malloc(as * sizeof(double *));
-        dummyArray = (double **)malloc(as * sizeof(double *));
-
         for (int i = 0; i < as; i++)
         {
             masterArray[i] = (double *)malloc(as * sizeof(double));
-            dummyArray[i] = (double *)malloc(as * sizeof(double));
             for (int j = 0; j < as; j++)
-            {
                 masterArray[i][j] = testingArray[i][j];
-                if (i == 0 || i == as - 1)
-                    dummyArray[i][j] = testingArray[i][j];
-                else
-                    dummyArray[i][j] = -1;
-            }
         }
-
-        // Send lines of array to slave processors and own buffer
-        for (int i = 1; i < worldSize; i++)
-            for (int j = 0; j < rowsPerProc; j++)
-            {
-                int rowToSend = ((as - 2) / worldSize) * i + j;
-                MPI_Send(masterArray[rowToSend], as, MPI_DOUBLE, i, j, MPI_COMM_WORLD);
-            }
-
-        for (int i = 0; i < rowsPerProc; i++)
-            for (int j = 0; j < as; j++)
-                buffer[i][j] = masterArray[i][j];
     }
 
-    // All non-root processors recieve their rows
-    else
-        for (int i = 0; i < rowsPerProc; i++)
-            MPI_Recv(buffer[i], as, MPI_DOUBLE, 0, i, MPI_COMM_WORLD, &stat);
-
-    // Compute and store averages for all non-edges, store edge values as given
-    for (int i = 1; i < rowsPerProc - 1; i++)
+    while (loop == 1)
     {
-        for (int j = 1; j < as - 1; j++)
-            updatedBuffer[i - 1][j] = (buffer[i + 1][j] + buffer[i - 1][j] + buffer[i][j + 1] + buffer[i][j - 1]) / 4;
-        updatedBuffer[i - 1][0] = buffer[i][0];
-        updatedBuffer[i - 1][as - 1] = buffer[i][as - 1];
+        loop = 0;
 
-        // Send updated values to dummy array
         if (worldRank == 0)
         {
-            for (int j = 0; j < as; j++)
-                dummyArray[i][j] = updatedBuffer[i - 1][j];
+            // Send lines of array to slave processors...
+            for (int i = 1; i < worldSize; i++)
+                for (int j = 0; j < rowsPerProc; j++)
+                {
+                    int rowToSend = ((as - 2) / worldSize) * i + j;
+                    MPI_Send(masterArray[rowToSend], as, MPI_DOUBLE, i, j, MPI_COMM_WORLD);
+                }
 
-            for (int j = 1; j < worldSize; j++)
-                MPI_Recv(dummyArray[j * (rowsPerProc - 2) + i], as, MPI_DOUBLE, j, j * (rowsPerProc - 2) + i, MPI_COMM_WORLD, &stat);
+            // ...and own buffer
+            for (int i = 0; i < rowsPerProc; i++)
+                for (int j = 0; j < as; j++)
+                    buffer[i][j] = masterArray[i][j];
         }
 
+        // All non-root processors recieve their rows
         else
-            MPI_Send(updatedBuffer[i - 1], as, MPI_DOUBLE, 0, worldRank * (rowsPerProc - 2) + i, MPI_COMM_WORLD);
+            for (int i = 0; i < rowsPerProc; i++)
+                MPI_Recv(buffer[i], as, MPI_DOUBLE, 0, i, MPI_COMM_WORLD, &stat);
+
+        for (int i = 1; i < rowsPerProc - 1; i++)
+        {
+            diff = 0;
+
+            // Compute and store averages for all non-edges
+            for (int j = 1; j < as - 1; j++)
+            {
+                updatedBuffer[i - 1][j] = (buffer[i + 1][j] + buffer[i - 1][j] + buffer[i][j + 1] + buffer[i][j - 1]) / 4;
+                if (fabs(updatedBuffer[i - 1][j] - buffer[i][j]) > diff)
+                    diff = fabs(updatedBuffer[i - 1][j] - buffer[i][j]);
+            }
+
+            // Store edge values as given
+            updatedBuffer[i - 1][0] = buffer[i][0];
+            updatedBuffer[i - 1][as - 1] = buffer[i][as - 1];
+
+            // If maximum difference between original and updated values is above tolerance, make first entry negative
+            if (diff > tol)
+                updatedBuffer[i - 1][0] = -1 * updatedBuffer[i - 1][0];
+
+            // Send updated values to master array
+            if (worldRank == 0)
+            {
+                for (int j = 0; j < as - 1; j++)
+                    masterArray[i][j] = updatedBuffer[i - 1][j];
+
+                for (int j = 1; j < worldSize; j++)
+                    MPI_Recv(masterArray[j * (rowsPerProc - 2) + i], as, MPI_DOUBLE, j, j * (rowsPerProc - 2) + i, MPI_COMM_WORLD, &stat);
+            }
+            else
+                MPI_Send(updatedBuffer[i - 1], as, MPI_DOUBLE, 0, worldRank * (rowsPerProc - 2) + i, MPI_COMM_WORLD);
+        }
+
+        // If any values are negative, flip them and re run loop
+        if (worldRank == 0)
+        {
+            for (int i = 1; i < as - 1; i++)
+                if (masterArray[i][0] < 0)
+                {
+                    masterArray[i][0] = -1 * masterArray[i][0];
+                    loop = 1;
+                }
+        }
+        MPI_Bcast(&loop, 1, MPI_INT, 0, MPI_COMM_WORLD);
     }
 
     // Output result to console
     if (verbose == 1 && worldRank == 0)
-    {
-        printf("\nMaster:\n");
         for (int i = 0; i < as; i++)
         {
             for (int j = 0; j < as; j++)
-            {
                 printf("%0.3f ", masterArray[i][j]);
-            }
             printf("\n");
         }
-
-        printf("\nDummy:\n");
-        for (int i = 0; i < as; i++)
-        {
-            for (int j = 0; j < as; j++)
-            {
-                printf("%0.3f ", dummyArray[i][j]);
-            }
-            printf("\n");
-        }
-    }
 
     // Free memory used for arrays
+
+    for (int i = 0; i < rowsPerProc; i++)
+    {
+        free(buffer[i]);
+        if (i != 0 && i != rowsPerProc - 1)
+            free(updatedBuffer[i - 1]);
+    }
+    free(buffer);
+    free(updatedBuffer);
+
     if (worldRank == 0)
     {
         for (int i = 0; i < as; i++)
-        {
             free(masterArray[i]);
-            free(dummyArray[i]);
-        }
         free(masterArray);
-        free(dummyArray);
     }
 
     return 0;
@@ -304,12 +321,10 @@ int main()
             printf("\n");
 
         // Run sequential algorithm on testing array
-        /*
         t = 0;
         for (int i = 0; i < numTests; i++)
             t += runSeq(arraySize, tolerance, verbose);
         printf("seq %f\n", t / numTests);
-        */
     }
 
     // Run distributed algorithm on testing array
