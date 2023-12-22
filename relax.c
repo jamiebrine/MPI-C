@@ -142,8 +142,9 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose)
     double diff = 0;
     int loop = 1;
 
-    //(currently need exact divisors)
+    // Assign each processor a number of rows it will work on
     int rowsPerProc = ((as - 2) / worldSize) + 2;
+    rowsPerProc += (((as - 2) % worldSize) + worldRank) / worldSize;
 
     // Initialise buffers
     buffer = (double **)malloc(rowsPerProc * sizeof(double *));
@@ -174,13 +175,20 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose)
 
         if (worldRank == 0)
         {
+            int first = rowsPerProc - 1;
+            int extra;
+
             // Send lines of array to slave processors...
             for (int i = 1; i < worldSize; i++)
-                for (int j = 0; j < rowsPerProc; j++)
+            {
+                extra = (((as - 2) % worldSize) + i) / worldSize;
+                for (int j = 0; j < rowsPerProc + extra; j++)
                 {
-                    int rowToSend = ((as - 2) / worldSize) * i + j;
+                    int rowToSend = first - 1 + j;
                     MPI_Send(masterArray[rowToSend], as, MPI_DOUBLE, i, j, MPI_COMM_WORLD);
                 }
+                first += rowsPerProc - 2 + extra;
+            }
 
             // ...and own buffer
             for (int i = 0; i < rowsPerProc; i++)
@@ -215,15 +223,28 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose)
 
             // Send updated values to master array
             if (worldRank == 0)
-            {
                 for (int j = 0; j < as - 1; j++)
                     masterArray[i][j] = updatedBuffer[i - 1][j];
-
-                for (int j = 1; j < worldSize; j++)
-                    MPI_Recv(masterArray[j * (rowsPerProc - 2) + i], as, MPI_DOUBLE, j, j * (rowsPerProc - 2) + i, MPI_COMM_WORLD, &stat);
-            }
             else
-                MPI_Send(updatedBuffer[i - 1], as, MPI_DOUBLE, 0, worldRank * (rowsPerProc - 2) + i, MPI_COMM_WORLD);
+                MPI_Send(updatedBuffer[i - 1], as, MPI_DOUBLE, 0, (1000 * worldRank) + i, MPI_COMM_WORLD);
+        }
+
+        // Recieve updated values from slave processes
+        if (worldRank == 0)
+        {
+            int first = rowsPerProc;
+            int extra;
+
+            for (int i = 1; i < worldSize; i++)
+            {
+                extra = (((as - 2) % worldSize) + i) / worldSize;
+                for (int j = 0; j < rowsPerProc + extra - 2; j++)
+                {
+                    int rowToRecieve = first - 1 + j;
+                    MPI_Recv(masterArray[rowToRecieve], as, MPI_DOUBLE, i, (1000 * i) + j + 1, MPI_COMM_WORLD, &stat);
+                }
+                first += rowsPerProc - 2 + extra;
+            }
         }
 
         // If any values are negative, flip them and re run loop
@@ -292,8 +313,8 @@ int main()
     double t;
 
     //// Testing parameters ////
-    double arraySize = 10;
-    double tolerance = 0.01;
+    double arraySize = 20;
+    double tolerance = 0.001;
     int numTests = 1;
     int verbose = 1;
     ////////////////////////////
