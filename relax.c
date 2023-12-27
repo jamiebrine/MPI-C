@@ -142,6 +142,9 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose)
     double diff = 0;
     int loop = 1;
 
+    struct timeval myTVstart, myTVend;
+    TIMEDIFF *difference;
+
     // Assign each processor a number of rows it will work on
     int rowsPerProc = ((as - 2) / worldSize) + 2;
     rowsPerProc += (((as - 2) % worldSize) + worldRank) / worldSize;
@@ -167,6 +170,9 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose)
             for (int j = 0; j < as; j++)
                 masterArray[i][j] = testingArray[i][j];
         }
+
+        // Start timer
+        gettimeofday(&myTVstart, NULL);
     }
 
     while (loop == 1)
@@ -260,6 +266,13 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose)
         MPI_Bcast(&loop, 1, MPI_INT, 0, MPI_COMM_WORLD);
     }
 
+    // End timer
+    if (worldRank == 0)
+    {
+        gettimeofday(&myTVend, NULL);
+        difference = diffTime(&myTVstart, &myTVend);
+    }
+
     // Output result to console
     if (verbose == 1 && worldRank == 0)
         for (int i = 0; i < as; i++)
@@ -287,7 +300,10 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose)
         free(masterArray);
     }
 
-    return 0;
+    if (worldRank == 0)
+        return difference->secs + ((double)difference->usecs / 1000000);
+    else
+        return 0;
 }
 
 int main()
@@ -313,10 +329,10 @@ int main()
     double t;
 
     //// Testing parameters ////
-    double arraySize = 20;
-    double tolerance = 0.001;
+    double arraySize = 500;
+    double tolerance = 0.01;
     int numTests = 1;
-    int verbose = 1;
+    int verbose = 0;
     ////////////////////////////
 
     // Create and initialise testing array that all tests will use
@@ -350,12 +366,15 @@ int main()
 
     // Run distributed algorithm on testing array
     MPI_Barrier(MPI_COMM_WORLD);
+
     t = 0;
     for (int i = 0; i < numTests; i++)
         t += run(world_rank, world_size, arraySize, tolerance, verbose);
 
     MPI_Barrier(MPI_COMM_WORLD);
-    printf("MPI %f from %d\n", t / numTests, world_rank);
+
+    if (world_rank == 0)
+        printf("MPI %f\n", t / numTests);
 
     MPI_Finalize();
 }
