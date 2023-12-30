@@ -134,6 +134,7 @@ double runSeq(int as, double tol, int verbose)
 double run(int worldRank, int worldSize, int as, double tol, int verbose)
 {
     MPI_Status stat;
+    MPI_Request req;
 
     double **masterArray;
     double **buffer;
@@ -191,7 +192,7 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose)
                 for (int j = 0; j < rowsPerProc + extra; j++)
                 {
                     int rowToSend = first - 1 + j;
-                    MPI_Send(masterArray[rowToSend], as, MPI_DOUBLE, i, j, MPI_COMM_WORLD);
+                    MPI_Isend(masterArray[rowToSend], as, MPI_DOUBLE, i, j, MPI_COMM_WORLD, &req);
                 }
                 first += rowsPerProc - 2 + extra;
             }
@@ -205,7 +206,9 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose)
         // All non-root processors recieve their rows
         else
             for (int i = 0; i < rowsPerProc; i++)
-                MPI_Recv(buffer[i], as, MPI_DOUBLE, 0, i, MPI_COMM_WORLD, &stat);
+                MPI_Irecv(buffer[i], as, MPI_DOUBLE, 0, i, MPI_COMM_WORLD, &req);
+
+        MPI_Barrier(MPI_COMM_WORLD);
 
         for (int i = 1; i < rowsPerProc - 1; i++)
         {
@@ -232,8 +235,11 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose)
                 for (int j = 0; j < as - 1; j++)
                     masterArray[i][j] = updatedBuffer[i - 1][j];
             else
-                MPI_Send(updatedBuffer[i - 1], as, MPI_DOUBLE, 0, (1000 * worldRank) + i, MPI_COMM_WORLD);
+                MPI_Isend(updatedBuffer[i - 1], as, MPI_DOUBLE, 0, (1000 * worldRank) + i, MPI_COMM_WORLD, &req);
         }
+
+        if (worldRank != 0)
+            MPI_Barrier(MPI_COMM_WORLD);
 
         // Recieve updated values from slave processes
         if (worldRank == 0)
@@ -247,15 +253,14 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose)
                 for (int j = 0; j < rowsPerProc + extra - 2; j++)
                 {
                     int rowToRecieve = first - 1 + j;
-                    MPI_Recv(masterArray[rowToRecieve], as, MPI_DOUBLE, i, (1000 * i) + j + 1, MPI_COMM_WORLD, &stat);
+                    MPI_Irecv(masterArray[rowToRecieve], as, MPI_DOUBLE, i, (1000 * i) + j + 1, MPI_COMM_WORLD, &req);
                 }
                 first += rowsPerProc - 2 + extra;
             }
-        }
 
-        // If any values are negative, flip them and re run loop
-        if (worldRank == 0)
-        {
+            MPI_Barrier(MPI_COMM_WORLD);
+
+            // If any values are negative, flip them and re run loop
             for (int i = 1; i < as - 1; i++)
                 if (masterArray[i][0] < 0)
                 {
@@ -332,7 +337,7 @@ int main()
     double arraySize = 500;
     double tolerance = 0.01;
     int numTests = 1;
-    int verbose = 0;
+    int verbose = 1;
     ////////////////////////////
 
     // Create and initialise testing array that all tests will use
