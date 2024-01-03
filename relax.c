@@ -41,7 +41,7 @@ TIMEDIFF *diffTime(struct timeval *start, struct timeval *end)
 }
 
 // Sequential version of algorithm for purpose of comparison
-double runSeq(int as, double tol, int verbose)
+double runSeq(int as, double tol, int verbose, double **ta)
 {
     double **masterArraySeq;
     double **dummyArraySeq;
@@ -57,12 +57,8 @@ double runSeq(int as, double tol, int verbose)
     }
 
     for (int i = 0; i < as; i++)
-    {
         for (int j = 0; j < as; j++)
-        {
-            masterArraySeq[i][j] = testingArray[i][j];
-        }
-    }
+            masterArraySeq[i][j] = ta[i][j];
 
     // Begin timer
     struct timeval myTVstart, myTVend;
@@ -107,7 +103,7 @@ double runSeq(int as, double tol, int verbose)
 
     if (verbose == 1)
     {
-        printf("\nResult:\n");
+        printf("Result Seq:\n");
         // Output result to console
         for (int i = 0; i < as; i++)
         {
@@ -117,6 +113,7 @@ double runSeq(int as, double tol, int verbose)
             }
             printf("\n");
         }
+        printf("\n");
     }
 
     // Free memory used for arrays
@@ -131,7 +128,7 @@ double runSeq(int as, double tol, int verbose)
     return difference->secs + ((double)difference->usecs / 1000000);
 }
 
-double run(int worldRank, int worldSize, int as, double tol, int verbose)
+double run(int worldRank, int worldSize, int as, double tol, int verbose, double **ta)
 {
     MPI_Status stat;
 
@@ -186,7 +183,7 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose)
             masterArray[i] = &(masterArr[i * as]);
 
             for (int j = 0; j < as; j++)
-                masterArray[i][j] = testingArray[i][j];
+                masterArray[i][j] = ta[i][j];
         }
         // Start timer
         gettimeofday(&myTVstart, NULL);
@@ -271,12 +268,16 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose)
 
     // Output result to console
     if (verbose == 1 && worldRank == 0)
+    {
+        printf("Result MPI:\n");
         for (int i = 0; i < as; i++)
         {
             for (int j = 0; j < as; j++)
                 printf("%0.3f ", masterArray[i][j]);
             printf("\n");
         }
+        printf("\n");
+    }
 
     // Free memory used for arrays
     free(bufferArr);
@@ -298,73 +299,120 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose)
 
 int main()
 {
-    // Initialize the MPI environment
     MPI_Init(NULL, NULL);
 
-    // Get the number of processes
     int world_size;
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    // Get the rank of the process
     int world_rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
 
-    // Get the name of the processor
     char processor_name[MPI_MAX_PROCESSOR_NAME];
     int name_len;
     MPI_Get_processor_name(processor_name, &name_len);
 
+    // Start timer
+    struct timeval overallTVstart, overallTVend;
+    TIMEDIFF *overallTime;
+    if (world_rank == 0)
+        gettimeofday(&overallTVstart, NULL);
+
+    ////////////////////////////////////////////
+    //////////// Testing parameters ////////////
+    const int numSizes = 2;
+    const int arraySize[numSizes] = {10, 20};
+    const double tolerance = 0.01;
+    const int numTests = 3;
+    const int verbose = 1;
+    const int doSeq = 1;
+    const int doMPI = 0;
+    ////////////////////////////////////////////
+    ////////////////////////////////////////////
+
+    // Uses same random seed to ensure consistency between tests
     srand(0);
     rand();
-    double t;
 
-    //// Testing parameters ////
-    double arraySize = 2000;
-    double tolerance = 0.01;
-    int numTests = 1;
-    int verbose = 0;
-    ////////////////////////////
+    double **testingArray;
+    double tMPI[numSizes] = {0};
+    double tSeq[numSizes] = {0};
 
-    // Initialise testing array that all tests will use
-    if (world_rank == 0)
+    for (int size = 0; size < numSizes; size++)
     {
-        testingArray = (double **)malloc(arraySize * sizeof(double *));
-        if (verbose == 1)
-            printf("Initial array:\n");
-
-        for (int i = 0; i < arraySize; i++)
+        // Initialise testing array that all tests of that size will use
+        if (world_rank == 0)
         {
-            testingArray[i] = (double *)malloc(arraySize * sizeof(double));
-            for (int j = 0; j < arraySize; j++)
-            {
-                testingArray[i][j] = (double)rand() / (double)RAND_MAX;
-                if (verbose == 1)
-                    printf("%0.3f ", testingArray[i][j]);
-            }
-            if (verbose == 1)
-                printf("\n");
+            testingArray = (double **)malloc(arraySize[size] * sizeof(double *));
+            for (int i = 0; i < arraySize[size]; i++)
+                testingArray[i] = (double *)malloc(arraySize[size] * sizeof(double));
         }
-        if (verbose == 1)
-            printf("\n");
 
-        // Run sequential algorithm on testing array
-        t = 0;
         for (int i = 0; i < numTests; i++)
-            t += runSeq(arraySize, tolerance, verbose);
-        printf("%f\n", t / numTests);
+        {
+            // Populate testing array with random values
+            if (world_rank == 0)
+            {
+                if (verbose)
+                    printf("Testing array:\n");
+
+                for (int j = 0; j < arraySize[size]; j++)
+                {
+                    for (int k = 0; k < arraySize[size]; k++)
+                    {
+                        testingArray[j][k] = (double)rand() / (double)RAND_MAX;
+                        if (verbose)
+                            printf("%0.3f ", testingArray[j][k]);
+                    }
+                    if (verbose)
+                        printf("\n");
+                }
+
+                if (verbose)
+                    printf("\n");
+            }
+
+            // Run testing algorithms
+            if (doSeq)
+            {
+                if (world_rank == 0)
+                    tSeq[size] += runSeq(arraySize[size], tolerance, verbose, testingArray);
+                MPI_Barrier(MPI_COMM_WORLD);
+            }
+
+            if (doMPI)
+                tMPI[size] += run(world_rank, world_size, arraySize[size], tolerance, verbose, testingArray);
+        }
+
+        // Free memory used for testing array
+        if (world_rank == 0)
+        {
+            for (int i = 0; i < arraySize[size]; i++)
+                free(testingArray[i]);
+            free(testingArray);
+        }
     }
 
-    // Run distributed algorithm on testing array
-    MPI_Barrier(MPI_COMM_WORLD);
-
-    t = 0;
-    for (int i = 0; i < numTests; i++)
-        t += run(world_rank, world_size, arraySize, tolerance, verbose);
-
-    MPI_Barrier(MPI_COMM_WORLD);
-
+    // Stop timer
     if (world_rank == 0)
-        printf("%f\n", t / numTests);
+    {
+        gettimeofday(&overallTVend, NULL);
+        overallTime = diffTime(&overallTVstart, &overallTVend);
+    }
+
+    // Output results
+    if (world_rank == 0)
+    {
+        for (int i = 0; i < numSizes; i++)
+        {
+            printf("%d:\n", arraySize[i]);
+            if (doSeq)
+                printf("Seq %f\n", tSeq[i] / numTests);
+            if (doMPI)
+                printf("MPI %f\n", tMPI[i] / numTests);
+            printf("\n");
+        }
+        printf("(%f)\n", overallTime->secs + ((double)overallTime->usecs / 1000000));
+    }
 
     MPI_Finalize();
 }
