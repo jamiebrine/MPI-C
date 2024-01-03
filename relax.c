@@ -43,6 +43,11 @@ TIMEDIFF *diffTime(struct timeval *start, struct timeval *end)
 // Sequential version of algorithm for purpose of comparison
 double runSeq(int as, double tol, int verbose, double **ta)
 {
+    // Begin timer
+    struct timeval myTVstart, myTVend;
+    TIMEDIFF *difference;
+    gettimeofday(&myTVstart, NULL);
+
     double **masterArraySeq;
     double **dummyArraySeq;
     double maxDiff = 9999;
@@ -59,11 +64,6 @@ double runSeq(int as, double tol, int verbose, double **ta)
     for (int i = 0; i < as; i++)
         for (int j = 0; j < as; j++)
             masterArraySeq[i][j] = ta[i][j];
-
-    // Begin timer
-    struct timeval myTVstart, myTVend;
-    TIMEDIFF *difference;
-    gettimeofday(&myTVstart, NULL);
 
     while (maxDiff > tol)
     {
@@ -130,32 +130,43 @@ double runSeq(int as, double tol, int verbose, double **ta)
 
 double run(int worldRank, int worldSize, int as, double tol, int verbose, double **ta)
 {
-    MPI_Status stat;
+    // Start timer
+    struct timeval myTVstart, myTVend;
+    TIMEDIFF *difference;
+    if (worldRank == 0)
+        gettimeofday(&myTVstart, NULL);
 
     double *masterArr;
     double **masterArray;
-
     double diff = 0;
     int loop = 1;
 
-    struct timeval myTVstart, myTVend;
-    TIMEDIFF *difference;
-
     // Assign each processor a number of rows it will work on
     int rowsPerProc[worldSize];
+    int sendCounts[worldSize];
     int recvCounts[worldSize];
-    int displacements[worldSize];
+    int sendDisp[worldSize];
+    int recvDisp[worldSize];
 
+    // Populate counts and displacements for later scatter/ gather operations
     for (int i = 0; i < worldSize; i++)
     {
         rowsPerProc[i] = ((as - 2) / worldSize) + 2;
         rowsPerProc[i] += (((as - 2) % worldSize) + i) / worldSize;
+
         recvCounts[i] = (rowsPerProc[i] - 2) * as;
+        sendCounts[i] = recvCounts[i] + (2 * as);
 
         if (i == 0)
-            displacements[i] = as;
+        {
+            sendDisp[i] = 0;
+            recvDisp[i] = as;
+        }
         else
-            displacements[i] = displacements[i - 1] + recvCounts[i - 1];
+        {
+            sendDisp[i] = sendDisp[i - 1] + recvCounts[i - 1];
+            recvDisp[i] = recvDisp[i - 1] + recvCounts[i - 1];
+        }
     }
 
     // Initialise buffers
@@ -185,41 +196,15 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose, double
             for (int j = 0; j < as; j++)
                 masterArray[i][j] = ta[i][j];
         }
-        // Start timer
-        gettimeofday(&myTVstart, NULL);
     }
 
     while (loop == 1)
     {
         loop = 0;
 
-        if (worldRank == 0)
-        {
-            int first = rowsPerProc[worldRank] - 1;
-            int extra;
-
-            // Send lines of array to slave processors...
-            for (int i = 1; i < worldSize; i++)
-            {
-                extra = (((as - 2) % worldSize) + i) / worldSize;
-                for (int j = 0; j < rowsPerProc[worldRank] + extra; j++)
-                {
-                    int rowToSend = first - 1 + j;
-                    MPI_Send(masterArray[rowToSend], as, MPI_DOUBLE, i, j, MPI_COMM_WORLD);
-                }
-                first += rowsPerProc[worldRank] - 2 + extra;
-            }
-
-            // ...and own buffer
-            for (int i = 0; i < rowsPerProc[worldRank]; i++)
-                for (int j = 0; j < as; j++)
-                    buffer[i][j] = masterArray[i][j];
-        }
-
-        // All non-root processors recieve their rows
-        else
-            for (int i = 0; i < rowsPerProc[worldRank]; i++)
-                MPI_Recv(buffer[i], as, MPI_DOUBLE, 0, i, MPI_COMM_WORLD, &stat);
+        // Scatter values to slave processors
+        MPI_Scatterv(masterArr, sendCounts, sendDisp, MPI_DOUBLE, bufferArr,
+                     sendCounts[worldRank], MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
         for (int i = 1; i < rowsPerProc[worldRank] - 1; i++)
         {
@@ -243,8 +228,8 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose, double
         }
 
         // Recieve updated values from slave processes
-        MPI_Gatherv(uBufferArr, (rowsPerProc[worldRank] - 2) * as,
-                    MPI_DOUBLE, masterArr, recvCounts, displacements, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Gatherv(uBufferArr, recvCounts[worldRank], MPI_DOUBLE, masterArr,
+                    recvCounts, recvDisp, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
         // If any values are negative, flip them and re run loop
         if (worldRank == 0)
@@ -256,6 +241,7 @@ double run(int worldRank, int worldSize, int as, double tol, int verbose, double
                     loop = 1;
                 }
         }
+
         MPI_Bcast(&loop, 1, MPI_INT, 0, MPI_COMM_WORLD);
     }
 
@@ -319,13 +305,13 @@ int main()
 
     ////////////////////////////////////////////
     //////////// Testing parameters ////////////
-    const int numSizes = 2;
-    const int arraySize[numSizes] = {10, 20};
+    const int numSizes = 3;
+    const int arraySize[numSizes] = {200, 500, 1000};
     const double tolerance = 0.01;
-    const int numTests = 3;
-    const int verbose = 1;
+    const int numTests = 2;
+    const int verbose = 0;
     const int doSeq = 1;
-    const int doMPI = 0;
+    const int doMPI = 1;
     ////////////////////////////////////////////
     ////////////////////////////////////////////
 
